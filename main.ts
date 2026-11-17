@@ -1,16 +1,18 @@
 // Token Launch Radar: the entrypoint (Node 22+, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every eligible pre-token protocol with the credibility-weighted
-// category model in lib/model.ts (category-shrinkage-2: each category's
-// mcap/TVL median blended with the global median by its sample size),
-// writes the ranked board to /output/board.json and the dashboard's data
-// to /output/data.js, copies dashboard/ and screenshots/ into /output,
-// and writes /output/dossier.json LAST with the vendored make.fun
-// library, exactly as the gate rebuilds it.
+// fits the value model on the snapshot's token protocols and tests it on a
+// held-out split (lib/model.ts fitConstants: grid + leave-one-out selection,
+// then one held-out test against a flat-multiple baseline), scores every
+// eligible pre-token protocol with the fitted model, prices a bootstrap band
+// and a netted farm verdict for every row, writes the ranked board to
+// /output/board.json and the dashboard's data to /output/data.js, copies
+// dashboard/ and screenshots/ into /output, and writes /output/dossier.json
+// LAST with the vendored make.fun library, exactly as the gate rebuilds it.
 //
-// Deterministic: no clock, no randomness, every sort breaks ties by slug,
-// and files are copied in sorted name order. Two runs write byte-identical bytes.
+// Deterministic: no clock, no unseeded randomness (the bootstrap uses a fixed
+// seed), every sort breaks ties by slug, and files are copied in sorted name
+// order. Two runs write byte-identical bytes.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -102,5 +104,7 @@ writeFileSync(
 
 process.stdout.write(
   `token radar [${MODEL_VERSION}]: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} beyond the watchlist, ${radar.excluded_total} excluded products, ${radar.live_size} live set aside)\n` +
+    `token radar: fitted prior ${radar.model.shrinkage_prior}, growth weight ${radar.model.growth_weight}, slope ${radar.model.elasticity_slope} on ${radar.validation.fit_protocols} protocols; ` +
+    `holdout n=${radar.validation.holdout.n}: median log error ${radar.validation.holdout.median_abs_log_error.toFixed(4)} vs flat ${radar.validation.holdout_baseline.median_abs_log_error.toFixed(4)}, wins ${radar.validation.holdout.wins}/${radar.validation.holdout.n}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

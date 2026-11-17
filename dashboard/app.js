@@ -38,20 +38,24 @@
 
   // ---- The model, recomputed in the page ----------------------------------
   // impliedOf is the same arithmetic main.ts runs: TVL x the row's multiple
-  // x the clamped growth factor x the log-scaled age factor. The multiple
-  // itself is credibility-weighted in the model (the category median
-  // blended with the global median by the category's sample size, in
-  // lib/model.ts multipleFor) and arrives per row in data.js, so the page
-  // recomputes from the same blended number. The detail view recomputes
-  // each row and checks the number against the one board.json carries, so
-  // the page's code and the board's data are visibly the same model.
+  // x the clamped growth factor x the log-scaled age factor x the size
+  // factor. The multiple itself is credibility-weighted in the model (the
+  // category median blended with the global median by the category's sample
+  // size, in lib/model.ts multipleFor) and arrives per row in data.js, so
+  // the page recomputes from the same blended number; the size factor uses
+  // the same reference TVL and fitted slope data.js carries. The detail
+  // view recomputes each row and checks the number against the one
+  // board.json carries, so the page's code and the board's data are
+  // visibly the same model. The operations run in the same order as
+  // lib/model.ts impliedValue, so the rounded dollar matches exactly.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null ? 0 : row.change_7d));
     var growthFactor = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days_used;
     var capped = Math.min(Math.max(age, 0), model.age_cap_days);
-    var ageFactor = model.age_floor + model.age_range * (Math.log(1 + capped) / Math.log(1 + model.age_cap_days));
-    return { implied: Math.max(1, Math.round(row.tvl_usd * row.multiple * growthFactor * ageFactor)), growthPct: growth, growthFactor: growthFactor, ageFactor: ageFactor };
+    var ageFactor = model.age_floor + model.age_range * (Math.log1p(capped) / Math.log1p(model.age_cap_days));
+    var sizeFactor = row.tvl_usd > 0 && DATA.ref_tvl_usd > 0 ? Math.pow(row.tvl_usd / DATA.ref_tvl_usd, model.elasticity_slope - 1) : 1;
+    return { implied: Math.max(1, Math.round(row.tvl_usd * row.multiple * growthFactor * ageFactor * sizeFactor)), growthPct: growth, growthFactor: growthFactor, ageFactor: ageFactor, sizeFactor: sizeFactor };
   }
 
   // ---- Filtering and sorting ----------------------------------------------
@@ -108,6 +112,34 @@
   }
 
   // ---- Static panels --------------------------------------------------------
+  // ---- The held-out test, rendered from the program's validation record --
+  // Every number below is computed by main.ts from the snapshot (see
+  // lib/model.ts fitConstants): the page formats the record, it never types
+  // a result. The headline sits above the fold; the full record sits in the
+  // method panel, with the selection grid and the leave-one-out figures.
+  function renderValidation() {
+    var v = DATA.validation;
+    var h = v.holdout, hb = v.holdout_baseline, f = v.fit_loo, fb = v.fit_loo_baseline, l = v.loo_all, lb = v.loo_all_baseline;
+    $('test-line').textContent = 'Held out before fitting: ' + h.n + ' token protocols the model never saw. ' +
+      'Typical error ×' + h.typical_multiple.toFixed(2) + ' vs ×' + hb.typical_multiple.toFixed(2) + ' for a flat multiple — ' +
+      'median log error ' + h.median_abs_log_error.toFixed(3) + ' vs ' + hb.median_abs_log_error.toFixed(3) +
+      ', winning ' + h.wins + ' of ' + h.n + ' head-to-head.';
+    $('test-note').textContent = 'Constants fitted by leave-one-out on ' + v.fit_protocols + ' protocols over ' + v.grid_cells +
+      ' grid cells (prior ' + v.selected_prior + ', growth weight ' + v.selected_growth_weight + ', slope ' + v.selected_slope +
+      '); the ' + v.holdout_protocols + ' held out touched neither selection nor fitting. Full record below, in “The held-out test”.';
+    $('test-detail').textContent = 'Split: ' + v.split_rule + ' — ' + v.fit_protocols + ' protocols fit, ' + v.holdout_protocols +
+      ' held out. Selection: ' + v.selection_metric + ', over ' + v.grid_cells + ' cells (8 priors × 5 growth weights × 7 slopes), ' +
+      'choosing prior ' + v.selected_prior + ', growth weight ' + v.selected_growth_weight + ', slope ' + v.selected_slope + '. ' +
+      'On the fit set, leave-one-out median log error ' + f.median_abs_log_error.toFixed(3) + ' vs flat ' + fb.median_abs_log_error.toFixed(3) +
+      ' (mean ' + f.mean_abs_log_error.toFixed(3) + ' vs ' + fb.mean_abs_log_error.toFixed(3) + ', ' + f.wins + '–' + fb.wins + '). ' +
+      'On the held-out ' + h.n + ', predicted once from medians fitted on the fit set alone: median ' + h.median_abs_log_error.toFixed(3) +
+      ' vs flat ' + hb.median_abs_log_error.toFixed(3) + ' (mean ' + h.mean_abs_log_error.toFixed(3) + ' vs ' + hb.mean_abs_log_error.toFixed(3) +
+      ', ' + h.wins + '–' + hb.wins + '), typical error ×' + h.typical_multiple.toFixed(2) + ' vs ×' + hb.typical_multiple.toFixed(2) + '. ' +
+      'Leave-one-out over all ' + l.n + ' token protocols under the chosen constants: median ' + l.median_abs_log_error.toFixed(3) +
+      ' vs flat ' + lb.median_abs_log_error.toFixed(3) + ' (mean ' + l.mean_abs_log_error.toFixed(3) + ' vs ' + lb.mean_abs_log_error.toFixed(3) +
+      ', ' + l.wins + '–' + lb.wins + '). The flat baseline is TVL times the global median, with no growth, age or size adjustment, on the same medians the model sees.';
+  }
+
   function renderMeta() {
     $('meta-date').textContent = DATA.as_of;
     $('meta-model').textContent = DATA.model_version;
@@ -115,8 +147,20 @@
     $('foot-date').textContent = DATA.as_of;
     $('foot-count').textContent = DATA.board_size + ' pre-token rows, ' + DATA.live_size + ' live-token protocols set aside';
     $('m-prior').textContent = String(DATA.model.shrinkage_prior);
+    $('m-prior2').textContent = String(DATA.model.shrinkage_prior);
     $('m-growth').textContent = DATA.model.growth_floor + '% to +' + DATA.model.growth_cap + '%';
+    $('m-gw').textContent = String(DATA.model.growth_weight);
+    $('m-gw2').textContent = String(DATA.model.growth_weight);
+    $('m-gw-down').textContent = (1 + (DATA.model.growth_floor / 100) * DATA.model.growth_weight).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
+    $('m-gw-up').textContent = (1 + (DATA.model.growth_cap / 100) * DATA.model.growth_weight).toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
     $('m-age').textContent = DATA.model.age_cap_days.toLocaleString('en-US') + ' days';
+    $('m-slope').textContent = String(DATA.model.elasticity_slope);
+    $('m-slope2').textContent = String(DATA.model.elasticity_slope);
+    $('m-ref').textContent = fmtUsd(DATA.ref_tvl_usd) + ' median token TVL';
+    $('m-refits').textContent = String(DATA.validation.bootstrap_refits);
+    $('m-typical').textContent = DATA.validation.holdout.typical_multiple.toFixed(1);
+    $('m-token-n').textContent = String(DATA.validation.token_protocols);
+    renderValidation();
     var blendedCats = {};
     DATA.rows.forEach(function (r) { if (r.multiple_source === 'blended') blendedCats[r.category] = true; });
     var blendedCount = Object.keys(blendedCats).length;
@@ -201,8 +245,11 @@
         el('td', { class: 'mult', text: '×' + r.multiple.toFixed(3) }, ' ', el('small', { text: r.multiple_source === 'blended' ? 'n=' + r.multiple_sample : 'global' })),
         el('td', null, el('div', { class: 'implied' },
           el('span', { class: 'val', text: fmtUsd(r.implied_value_usd) }),
+          el('span', { class: 'band', text: fmtUsd(r.band_low_usd) + ' – ' + fmtUsd(r.band_high_usd) }),
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + width + '%' }))
-        ))
+        )),
+        el('td', null, el('span', { class: 'verdict-chip ' + r.farm_verdict.verdict, text: r.farm_verdict.verdict.toUpperCase() }),
+          el('span', { class: 'verdict-be', text: 'break-even ' + r.farm_verdict.break_even_pct.toFixed(4) + '%' }))
       );
       tbody.appendChild(tr);
     });
@@ -256,10 +303,24 @@
     bd.appendChild(breakdownRow(multLabel, '×' + row.multiple.toFixed(4)));
     bd.appendChild(breakdownRow('7d change → growth factor', fmtPct(row.change_7d) + ' → ×' + check.growthFactor.toFixed(4)));
     bd.appendChild(breakdownRow('Age with no token → age factor', (row.age_days === null ? 'unknown, median ' + row.age_days_used + 'd used' : fmtAge(row.age_days)) + ' → ×' + check.ageFactor.toFixed(4)));
+    bd.appendChild(breakdownRow('Size factor', fmtUsd(row.tvl_usd) + ' vs ' + fmtUsd(DATA.ref_tvl_usd) + ' median token TVL, slope ' + DATA.model.elasticity_slope + ' → ×' + check.sizeFactor.toFixed(4)));
     bd.appendChild(breakdownRow('Implied value', fmtUsdFull(row.implied_value_usd), true));
+    bd.appendChild(breakdownRow('Uncertainty band (10th–90th of ' + DATA.validation.bootstrap_refits + ' refits)', fmtUsdFull(row.band_low_usd) + ' – ' + fmtUsdFull(row.band_high_usd)));
+    bd.appendChild(breakdownRow('Rank range across refits', row.rank_low === row.rank_high ? 'rank ' + row.rank_low + ' in every refit' : 'ranks ' + row.rank_low + '–' + row.rank_high));
     $('detail-recheck').textContent = 'Recomputed in this page from the same figures: ' + fmtUsdFull(check.implied) +
       (check.implied === row.implied_value_usd ? ' — the same number board.json carries.' : ' — differs from the board value; the data would be stale.') +
       ' Model ' + DATA.model_version + '. An estimate, not a price; it never predicts a token will issue.';
+    var vd = $('detail-verdict');
+    vd.textContent = '';
+    var fv = row.farm_verdict;
+    vd.appendChild(el('p', { class: 'verdict-line' },
+      el('span', { class: 'verdict-chip ' + fv.verdict, text: fv.verdict.toUpperCase() }),
+      ' Break-even needs an allocation of ' + fmtUsdFull(fv.expected_cost_usd) + ' — ' + fv.break_even_pct.toFixed(4) + '% of the implied value.'));
+    vd.appendChild(el('p', { class: 'sub' }, 'Sunk gas ' + fmtUsdFull(fv.gas_usd) + ' (two gas budgets: farming plus exit) + 5% risk charge ' +
+      fmtUsdFull(fv.risk_usd) + ' on ' + fmtUsdFull(fv.capital_usd) + ' deployed = ' + fmtUsdFull(fv.expected_cost_usd) + ' expected cost. ' +
+      'The band\u2019s low end holds ' + Math.round(fv.band_low_ratio * 100) + '% of the point estimate. ' +
+      'Farm needs break-even at most 0.001% with the low end holding 75%; thin needs at most 0.01% with the low end holding 50%; anything else is a skip. ' +
+      'The capital itself is deployed, not spent — the risk charge is the stated allowance for losing part of it.'));
     var facts = $('detail-facts');
     facts.textContent = '';
     facts.appendChild(fact('First listed', row.listed_at || 'not reported'));

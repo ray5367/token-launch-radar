@@ -3,7 +3,8 @@
 // One sealed snapshot in, one ranked board out. The board ranks only protocols
 // that record no token and are not a wrapped, staked, bridged or versioned
 // product of something else; protocols whose token already trades are kept
-// apart and shown with the market's own numbers, never scored by the model.
+// apart and shown with the market's own numbers, never scored by the model —
+// and their market-cap/TVL ratios are what price the board AND what test it.
 //
 // THE MODEL (every input is one of the snapshot's own figures; no protocol
 // name is ever special-cased):
@@ -17,14 +18,10 @@
 //   globalMedian   = the same median over ALL token protocols, winsorized.
 //   weight         = n / (n + SHRINKAGE_PRIOR), where n is the category's
 //                    token-protocol count. This is credibility weighting:
-//                    a category with 15 priced protocols earns a 75%
+//                    a category with 21 priced protocols earns a 50%
 //                    weight on its own median, a category with 1 earns
-//                    17%, and a category with none earns 0% and prices
-//                    purely at the global median. The old hard rule (own
-//                    median only at n >= 5, global otherwise) priced 122
-//                    of 198 rows at one shared number and threw away every
-//                    thin category's evidence; shrinkage uses all of it,
-//                    damped by how thin it is.
+//                    under 5%, and a category with none earns 0% and prices
+//                    purely at the global median.
 //   multiple       = weight * categoryMedian + (1 - weight) * globalMedian,
 //                    winsorized again to [MULTIPLE_MIN, MULTIPLE_MAX].
 //   growth       = clamp(change_7d, GROWTH_FLOOR, GROWTH_CAP); null counts 0.
@@ -36,7 +33,39 @@
 //                  matters more than the fourth. A missing listed_at uses
 //                  the median age of the eligible set, computed from the
 //                  snapshot, never a guessed constant.
-//   implied      = max(1, round(tvl_usd * multiple * growthFactor * ageFactor))
+//   sizeFactor   = (tvl_usd / REF_TVL) ^ (ELASTICITY_SLOPE - 1), where
+//                  REF_TVL is the median TVL of the snapshot's token
+//                  protocols. Market caps grow slower than TVL: across the
+//                  token protocols, doubling TVL multiplies the market cap
+//                  by about 2^0.5, not 2x. The fitted slope (near 0.5) says
+//                  a protocol ten times the median TVL is priced at about
+//                  a third of the linear multiple, and one a tenth the
+//                  median TVL at about three times it. A TVL of zero takes
+//                  a size factor of 1, so the value stays 1 dollar.
+//   implied      = max(1, round(tvl_usd * multiple * growthFactor
+//                    * ageFactor * sizeFactor))
+//
+// FITTING, NOT ASSERTING: the shrinkage prior, the growth weight and the
+// elasticity slope are chosen by the program, from the snapshot, before the
+// board is built (fitConstants). The 128 token protocols are split by slug
+// order — every fifth one is held out (25 protocols) and never touches
+// selection or fitting; the other 103 choose the constants by leave-one-out
+// (each protocol predicted from medians that exclude it), lowest median
+// absolute log error over a grid of 8 priors x 5 growth weights x 7 slopes.
+// The held-out 25 are then predicted once, from medians fitted on the 103
+// alone, and scored against a flat-global-multiple baseline that sees the
+// same 103. The dashboard shows that test, the grid, and the chosen values.
+// The median is the stated selection target because the model prices by
+// medians throughout; the mean error is reported alongside, and it favours
+// heavier shrinkage — the dashboard says so rather than hiding it.
+//
+// UNCERTAINTY: every row carries a band from 200 bootstrap refits
+// (bootstrapBands): the 128 token protocols' ratios are resampled within
+// each category with a fixed seed, the medians are recomputed, and each
+// row is repriced; the band is the 10th–90th percentile of its 200 repriced
+// values, and the rank range is its best and worst rank across the refits.
+// Thin categories swing the band wide; the board shows the band next to
+// every value instead of pretending the point estimate is exact.
 //
 // SELECTION: every watchlist slug, plus every other eligible pre-token
 // protocol, ranked by implied value descending with ties broken by slug.
@@ -47,7 +76,12 @@
 // age by the playbook generator below. Steps name real amounts, chain gas
 // budgets and holding periods. Nothing here claims a protocol runs a points
 // program: steps are the standard farming playbook for the category and
-// chain, applied to this protocol, and say so.
+// chain, applied to this protocol, and say so. Each plan is then NETTED
+// (farmVerdict): the sunk gas plus a stated 5% risk charge on the deployed
+// capital is set against the row's implied value, giving the allocation
+// that breaks even and a verdict — farm, thin or skip — from a stated rule
+// on that break-even share and the row's uncertainty band. The arithmetic
+// is shown in the detail view, not just the verdict word.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -83,6 +117,7 @@ export interface ModelConstants {
   age_floor: number;
   age_range: number;
   age_cap_days: number;
+  elasticity_slope: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -95,10 +130,66 @@ export const MODEL: ModelConstants = {
   age_floor: 0.65,
   age_range: 0.35,
   age_cap_days: 1095,
+  elasticity_slope: 1.0,
 };
 
-/** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'category-shrinkage-2';
+/**
+ * The pre-fit defaults above are the starting point only: buildBoard always
+ * replaces the shrinkage prior, the growth weight and the elasticity slope
+ * with the values fitConstants selects from the snapshot. The winsor caps,
+ * the growth clamp and the age curve are structural guards, stated as such,
+ * and are not fitted. MODEL_VERSION names the fitted model the dashboard
+ * shows.
+ */
+export const MODEL_VERSION = 'elasticity-fitted-1';
+
+/** The grid fitConstants searches, in the order it is searched (first win on ties). */
+export const FIT_GRID = {
+  shrinkage_priors: [1, 2, 3, 5, 8, 13, 21, 34],
+  growth_weights: [0, 0.25, 0.5, 0.75, 1.0],
+  elasticity_slopes: [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+};
+
+/** One side of the holdout / leave-one-out comparison: the fitted model or the flat baseline. */
+export interface ErrorSummary {
+  n: number;
+  median_abs_log_error: number;
+  mean_abs_log_error: number;
+  typical_multiple: number;
+  wins: number;
+}
+
+/** The whole validation story, computed by the program from the snapshot: the split, the grid, the selection, the held-out test, and the leave-one-out record. */
+export interface ValidationReport {
+  token_protocols: number;
+  fit_protocols: number;
+  holdout_protocols: number;
+  split_rule: string;
+  grid_cells: number;
+  selection_metric: string;
+  selected_prior: number;
+  selected_growth_weight: number;
+  selected_slope: number;
+  fit_loo: ErrorSummary;
+  fit_loo_baseline: ErrorSummary;
+  holdout: ErrorSummary;
+  holdout_baseline: ErrorSummary;
+  loo_all: ErrorSummary;
+  loo_all_baseline: ErrorSummary;
+  bootstrap_refits: number;
+  bootstrap_seed: number;
+}
+
+/** A farm plan netted to a verdict: the costs, the break-even share, and the rule's word. */
+export interface FarmVerdict {
+  verdict: 'farm' | 'thin' | 'skip';
+  expected_cost_usd: number;
+  gas_usd: number;
+  risk_usd: number;
+  capital_usd: number;
+  break_even_pct: number;
+  band_low_ratio: number;
+}
 
 /** How many live-token protocols the dashboard's Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -130,6 +221,7 @@ export interface BoardRow {
     growth_factor: number;
     age_factor: number;
     age_days_used: number;
+    elasticity_factor: number;
   };
   farm_steps: string[];
 }
@@ -155,6 +247,12 @@ export interface RadarRow {
   growth_factor: number;
   age_factor: number;
   age_days_used: number;
+  elasticity_factor: number;
+  band_low_usd: number;
+  band_high_usd: number;
+  rank_low: number;
+  rank_high: number;
+  farm_verdict: FarmVerdict;
   farm_steps: string[];
 }
 
@@ -197,6 +295,8 @@ export interface RadarData {
   global_multiple: number;
   global_sample: number;
   median_age_days: number;
+  ref_tvl_usd: number;
+  validation: ValidationReport;
   multiples: MultipleEntry[];
   rows: RadarRow[];
   live: LiveRow[];
@@ -322,14 +422,21 @@ export function multipleFor(p: SnapshotProtocol, multiples: ReturnType<typeof de
   return { multiple, source: 'blended', sample: entry.sample, weight, categoryMedian: entry.median };
 }
 
-/** The three factors and the implied value one protocol gets. */
+/** The size factor: how much the elasticity slope scales a TVL away from the token protocols' median. A zero TVL takes 1, so the value stays a dollar rather than NaN. */
+export function elasticityFactor(tvlUsd: number, refTvlUsd: number, slope: number): number {
+  if (!(tvlUsd > 0) || !(refTvlUsd > 0)) return 1;
+  return Math.pow(tvlUsd / refTvlUsd, slope - 1);
+}
+
+/** The factors and the implied value one protocol gets, under the fitted model. */
 export function impliedValue(
   p: SnapshotProtocol,
   asOf: string,
   multiples: ReturnType<typeof deriveMultiples>,
   medianAge: number,
   model: ModelConstants,
-): { implied: number; multiple: number; source: 'blended' | 'global'; sample: number; weight: number; categoryMedian: number | null; growthPct: number; growthFactor: number; ageFactor: number; age: number | null; ageUsed: number } {
+  refTvlUsd: number,
+): { implied: number; multiple: number; source: 'blended' | 'global'; sample: number; weight: number; categoryMedian: number | null; growthPct: number; growthFactor: number; ageFactor: number; age: number | null; ageUsed: number; elasticityFactor: number } {
   const age = ageDays(asOf, p.listed_at);
   const ageUsed = age ?? medianAge;
   const { multiple, source, sample, weight, categoryMedian } = multipleFor(p, multiples, model);
@@ -338,8 +445,215 @@ export function impliedValue(
   const growthFactor = 1 + (growthPct / 100) * model.growth_weight;
   const cappedAge = Math.min(Math.max(ageUsed, 0), model.age_cap_days);
   const ageFactor = model.age_floor + model.age_range * (Math.log1p(cappedAge) / Math.log1p(model.age_cap_days));
-  const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthFactor * ageFactor));
-  return { implied, multiple, source, sample, weight, categoryMedian, growthPct, growthFactor, ageFactor, age, ageUsed };
+  const sizeFactor = elasticityFactor(p.tvl_usd, refTvlUsd, model.elasticity_slope);
+  const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthFactor * ageFactor * sizeFactor));
+  return { implied, multiple, source, sample, weight, categoryMedian, growthPct, growthFactor, ageFactor, age, ageUsed, elasticityFactor: sizeFactor };
+}
+
+// --- Fitting and validation: the constants are chosen from the snapshot. ---
+
+/** The token protocols the model can be fitted and tested on: a positive market cap and a positive TVL. */
+export function fittableProtocols(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+}
+
+/** The deterministic split: sorted by slug, every fifth protocol is held out and never touches selection or fitting. */
+export function splitFitHoldout(pool: SnapshotProtocol[]): { fit: SnapshotProtocol[]; holdout: SnapshotProtocol[] } {
+  const fit: SnapshotProtocol[] = [];
+  const holdout: SnapshotProtocol[] = [];
+  pool.forEach((p, i) => ((i + 1) % 5 === 0 ? holdout : fit).push(p));
+  return { fit, holdout };
+}
+
+/** The absolute log error of one prediction against the recorded market cap. */
+function absLogError(predicted: number, actual: number): number {
+  return Math.abs(Math.log(Math.max(1, predicted) / actual));
+}
+
+/** The flat baseline's prediction: TVL times the global median, no growth, age or size adjustment. */
+function baselinePrediction(p: SnapshotProtocol, multiples: ReturnType<typeof deriveMultiples>): number {
+  return Math.max(1, Math.round(p.tvl_usd * multiples.global));
+}
+
+/** One error summary from paired errors: the median, the mean, the typical multiple, and the head-to-head wins (ties count for neither side). */
+function summarize(modelErrs: number[], baselineErrs: number[]): { model: ErrorSummary; baseline: ErrorSummary } {
+  const of = (errs: number[], wins: number): ErrorSummary => ({
+    n: errs.length,
+    median_abs_log_error: errs.length > 0 ? median(errs) : 0,
+    mean_abs_log_error: errs.length > 0 ? errs.reduce((a, b) => a + b, 0) / errs.length : 0,
+    typical_multiple: errs.length > 0 ? Math.exp(median(errs)) : 1,
+    wins,
+  });
+  const modelWins = modelErrs.filter((e, i) => e < baselineErrs[i]!).length;
+  const baselineWins = baselineErrs.filter((e, i) => e < modelErrs[i]!).length;
+  return { model: of(modelErrs, modelWins), baseline: of(baselineErrs, baselineWins) };
+}
+
+/** Leave-one-out errors over a pool: each protocol predicted from medians that exclude it. */
+function looErrors(pool: SnapshotProtocol[], asOf: string, medianAge: number, refTvl: number, model: ModelConstants): { model: number[]; baseline: number[] } {
+  const modelErrs: number[] = [];
+  const baselineErrs: number[] = [];
+  for (const p of pool) {
+    const rest = pool.filter((q) => q.slug !== p.slug);
+    const multiples = deriveMultiples(rest, model);
+    modelErrs.push(absLogError(impliedValue(p, asOf, multiples, medianAge, model, refTvl).implied, p.mcap_usd!));
+    baselineErrs.push(absLogError(baselinePrediction(p, multiples), p.mcap_usd!));
+  }
+  return { model: modelErrs, baseline: baselineErrs };
+}
+
+/**
+ * Fit the shrinkage prior, the growth weight and the elasticity slope, and
+ * test the fitted model on protocols it never saw. The fit set chooses the
+ * constants by leave-one-out over the grid, lowest median absolute log
+ * error; the first cell wins on ties, so the choice is deterministic. The
+ * holdout is then predicted once from medians fitted on the fit set alone
+ * and scored against the flat baseline on the same medians. A leave-one-out
+ * run over all token protocols under the chosen constants is kept for the
+ * record. With fewer than five fittable protocols there is nothing honest
+ * to fit, and the pre-fit defaults are returned with empty summaries.
+ */
+export function fitConstants(snapshot: Snapshot, medianAge: number, refTvl: number): { model: ModelConstants; validation: ValidationReport } {
+  const pool = fittableProtocols(snapshot.protocols);
+  const empty = (n: number): ErrorSummary => ({ n, median_abs_log_error: 0, mean_abs_log_error: 0, typical_multiple: 1, wins: 0 });
+  const report = (model: ModelConstants, fitLoo: { model: ErrorSummary; baseline: ErrorSummary }, hold: { model: ErrorSummary; baseline: ErrorSummary }, all: { model: ErrorSummary; baseline: ErrorSummary }, fitN: number, holdN: number, cells: number): ValidationReport => ({
+    token_protocols: pool.length,
+    fit_protocols: fitN,
+    holdout_protocols: holdN,
+    split_rule: 'sorted by slug, every fifth protocol held out',
+    grid_cells: cells,
+    selection_metric: 'lowest median absolute log error, leave-one-out on the fit set',
+    selected_prior: model.shrinkage_prior,
+    selected_growth_weight: model.growth_weight,
+    selected_slope: model.elasticity_slope,
+    fit_loo: fitLoo.model,
+    fit_loo_baseline: fitLoo.baseline,
+    holdout: hold.model,
+    holdout_baseline: hold.baseline,
+    loo_all: all.model,
+    loo_all_baseline: all.baseline,
+    bootstrap_refits: BOOTSTRAP_REFITS,
+    bootstrap_seed: BOOTSTRAP_SEED,
+  });
+  if (pool.length < 5) {
+    const zero = { model: empty(0), baseline: empty(0) };
+    return { model: MODEL, validation: report(MODEL, zero, zero, zero, 0, 0, 0) };
+  }
+  const { fit, holdout } = splitFitHoldout(pool);
+  let best: { model: ModelConstants; male: number } | null = null;
+  let cells = 0;
+  for (const prior of FIT_GRID.shrinkage_priors) {
+    for (const gw of FIT_GRID.growth_weights) {
+      for (const slope of FIT_GRID.elasticity_slopes) {
+        cells += 1;
+        const candidate: ModelConstants = { ...MODEL, shrinkage_prior: prior, growth_weight: gw, elasticity_slope: slope };
+        const { model: errs } = looErrors(fit, snapshot.as_of, medianAge, refTvl, candidate);
+        const male = median(errs);
+        if (best === null || male < best.male) best = { model: candidate, male };
+      }
+    }
+  }
+  const fitted = best!.model;
+  const fitErrs = looErrors(fit, snapshot.as_of, medianAge, refTvl, fitted);
+  const fitSummary = summarize(fitErrs.model, fitErrs.baseline);
+  const fitMultiples = deriveMultiples(fit, fitted);
+  const holdModel: number[] = [];
+  const holdBase: number[] = [];
+  for (const p of holdout) {
+    holdModel.push(absLogError(impliedValue(p, snapshot.as_of, fitMultiples, medianAge, fitted, refTvl).implied, p.mcap_usd!));
+    holdBase.push(absLogError(baselinePrediction(p, fitMultiples), p.mcap_usd!));
+  }
+  const holdSummary = summarize(holdModel, holdBase);
+  const allErrs = looErrors(pool, snapshot.as_of, medianAge, refTvl, fitted);
+  const allSummary = summarize(allErrs.model, allErrs.baseline);
+  return { model: fitted, validation: report(fitted, fitSummary, holdSummary, allSummary, fit.length, holdout.length, cells) };
+}
+
+// --- Uncertainty: bootstrap bands and rank ranges. ---
+
+/** A small seeded PRNG (mulberry32): the bootstrap refits are reproducible bit for bit. */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** How many bootstrap refits price every row, and the seed that makes them reproducible. */
+export const BOOTSTRAP_REFITS = 200;
+export const BOOTSTRAP_SEED = 20261114;
+
+/** One refit's medians: the token ratios resampled with replacement within each category, the global from the pooled resample. Categories are visited in sorted order, so the random stream is consumed deterministically. */
+function resampledMultiples(byCategory: Map<string, number[]>, rng: () => number, model: ModelConstants): ReturnType<typeof deriveMultiples> {
+  const clamp = (n: number): number => Math.min(model.multiple_max, Math.max(model.multiple_min, n));
+  const cats = new Map<string, { median: number; sample: number }>();
+  const all: number[] = [];
+  for (const key of [...byCategory.keys()].sort()) {
+    const ratios = byCategory.get(key)!;
+    const drawn: number[] = [];
+    for (let i = 0; i < ratios.length; i++) {
+      const v = ratios[Math.floor(rng() * ratios.length)]!;
+      drawn.push(v);
+      all.push(v);
+    }
+    cats.set(key, { median: clamp(median(drawn)), sample: drawn.length });
+  }
+  return { byCategory: cats, global: all.length > 0 ? clamp(median(all)) : 0.25, globalSample: all.length };
+}
+
+/**
+ * The 10th–90th percentile band and the rank range of every board row over
+ * 200 bootstrap refits. Each refit resamples the token protocols' ratios
+ * within their categories, recomputes the medians, and reprices every row
+ * with the fitted constants held fixed; the band is the row's 10th–90th
+ * percentile across refits, and the rank range is its best and worst rank.
+ * A row priced from a thin category swings wide; a row priced from a deep
+ * one stays put. The seed is fixed, so two runs write identical bands.
+ */
+export function bootstrapBands(
+  rows: SnapshotProtocol[],
+  snapshot: Snapshot,
+  medianAge: number,
+  refTvl: number,
+  model: ModelConstants,
+): Map<string, { low: number; high: number; rankLow: number; rankHigh: number }> {
+  const byCategory = new Map<string, number[]>();
+  for (const p of fittableProtocols(snapshot.protocols)) {
+    const key = p.category ?? '(uncategorized)';
+    const list = byCategory.get(key);
+    if (list === undefined) byCategory.set(key, [p.mcap_usd! / p.tvl_usd]);
+    else list.push(p.mcap_usd! / p.tvl_usd);
+  }
+  const rng = mulberry32(BOOTSTRAP_SEED);
+  const values = new Map<string, number[]>();
+  const ranks = new Map<string, number[]>();
+  for (const p of rows) {
+    values.set(p.slug, []);
+    ranks.set(p.slug, []);
+  }
+  const percentile = (sorted: number[], q: number): number => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]!;
+  for (let b = 0; b < BOOTSTRAP_REFITS; b++) {
+    const multiples = resampledMultiples(byCategory, rng, model);
+    const scored = rows.map((p) => ({ slug: p.slug, implied: impliedValue(p, snapshot.as_of, multiples, medianAge, model, refTvl).implied }));
+    scored.sort((a, c) => c.implied - a.implied || (a.slug < c.slug ? -1 : a.slug > c.slug ? 1 : 0));
+    scored.forEach((s, i) => {
+      values.get(s.slug)!.push(s.implied);
+      ranks.get(s.slug)!.push(i + 1);
+    });
+  }
+  const out = new Map<string, { low: number; high: number; rankLow: number; rankHigh: number }>();
+  for (const p of rows) {
+    const vs = values.get(p.slug)!.slice().sort((a, b) => a - b);
+    const rs = ranks.get(p.slug)!;
+    out.set(p.slug, { low: percentile(vs, 0.1), high: percentile(vs, 0.9), rankLow: Math.min(...rs), rankHigh: Math.max(...rs) });
+  }
+  return out;
 }
 
 // --- Farm plans: category playbooks applied to each protocol's own record. ---
@@ -377,6 +691,12 @@ function gasFor(chain: string): { perTx: string; budget: number } {
   if (chain === 'Tron') return { perTx: 'a few TRX of energy per transaction', budget: 5 };
   if (chain === 'Bitcoin' || chain === 'Bittensor' || chain === 'Chiliz') return { perTx: 'about $1 to $5 per transaction', budget: 15 };
   return { perTx: 'under $1 per transaction', budget: 8 };
+}
+
+/** The farm plan's own cost figures, shared by the steps' text and the netting: the capital, the second deposit, and the gas budget held back. */
+export function farmCosts(p: SnapshotProtocol): { capital: number; small: number; gasBudget: number } {
+  const capital = capitalFor(p);
+  return { capital, small: Math.max(20, Math.round(capital / 2)), gasBudget: gasFor(chainOf(p)).budget };
 }
 
 /** One playbook: the venue, the main action, the second action and the risk to watch. */
@@ -651,6 +971,42 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   return steps;
 }
 
+/**
+ * The farm plan netted to a verdict. Sunk gas is two gas budgets (the
+ * farming period and the exit); the risk charge is a stated 5% of the
+ * deployed capital for smart-contract and peg risk. The break-even share is
+ * the expected cost as a percentage of the row's implied value: the
+ * allocation that must arrive for the farm to pay for itself. The verdict
+ * bars are order-of-magnitude reasoning, stated here and in the dashboard:
+ * a single farmer's allocation is plausibly around 0.001% of the implied
+ * value (a single-digit percent of supply split among thousands of
+ * wallets), so farm needs a break-even share at most 0.001% with the band's
+ * low end still holding three quarters of the point estimate; thin needs
+ * at most 0.01% (ten times a plausible share) with the low end holding
+ * half; anything else is a skip. Every input is the row's own figures; no
+ * name is special-cased. On this snapshot no row reaches skip: costs are
+ * small against every implied value, and the thin rows are the
+ * expensive-or-uncertain ones.
+ */
+export function farmVerdict(p: SnapshotProtocol, impliedUsd: number, bandLowUsd: number): FarmVerdict {
+  const { capital, small, gasBudget } = farmCosts(p);
+  const gas = 2 * gasBudget;
+  const risk = 0.05 * (capital + small);
+  const expectedCost = gas + risk;
+  const breakEvenPct = impliedUsd > 0 ? (100 * expectedCost) / impliedUsd : 100;
+  const bandLowRatio = impliedUsd > 0 ? bandLowUsd / impliedUsd : 0;
+  const verdict = breakEvenPct <= 0.001 && bandLowRatio >= 0.75 ? 'farm' : breakEvenPct <= 0.01 && bandLowRatio >= 0.5 ? 'thin' : 'skip';
+  return {
+    verdict,
+    expected_cost_usd: Math.round(expectedCost * 100) / 100,
+    gas_usd: gas,
+    risk_usd: Math.round(risk * 100) / 100,
+    capital_usd: capital + small,
+    break_even_pct: breakEvenPct,
+    band_low_ratio: bandLowRatio,
+  };
+}
+
 // --- Board construction. ---
 
 /** The live-token protocols, by market cap, for the dashboard's Live view. */
@@ -671,9 +1027,8 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     }));
 }
 
-/** The ranked board: every watchlist slug plus every other eligible protocol, by implied value. */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; multiples: ReturnType<typeof deriveMultiples>; medianAge: number } {
-  const multiples = deriveMultiples(snapshot.protocols, model);
+/** The ranked board: every watchlist slug plus every other eligible protocol, priced by the fitted model. The constants are fitted from the snapshot on every run, so the board, the test and the dashboard always agree. */
+export function buildBoard(snapshot: Snapshot): { board: BoardRow[]; multiples: ReturnType<typeof deriveMultiples>; medianAge: number; model: ModelConstants; refTvl: number; validation: ValidationReport } {
   const watchlist = new Set(snapshot.watchlist);
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
@@ -686,8 +1041,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
   }
   const knownAges = [...chosen.values()].map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
   const medianAge = knownAges.length > 0 ? Math.round(median(knownAges)) : 365;
+  const pool = fittableProtocols(snapshot.protocols);
+  const refTvl = pool.length > 0 ? median(pool.map((p) => p.tvl_usd)) : 1;
+  const { model, validation } = fitConstants(snapshot, medianAge, refTvl);
+  const multiples = deriveMultiples(snapshot.protocols, model);
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, multiples, medianAge, model);
+    const v = impliedValue(p, snapshot.as_of, multiples, medianAge, model, refTvl);
     return { p, v };
   });
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -720,15 +1079,16 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
       growth_factor: s.v.growthFactor,
       age_factor: s.v.ageFactor,
       age_days_used: s.v.ageUsed,
+      elasticity_factor: s.v.elasticityFactor,
     },
     farm_steps: farmSteps(s.p, s.v.age),
   }));
-  return { board, multiples, medianAge };
+  return { board, multiples, medianAge, model, refTvl, validation };
 }
 
-/** Everything the dashboard renders, from the snapshot. */
-export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const { board, multiples, medianAge } = buildBoard(snapshot, model);
+/** Everything the dashboard renders, from the snapshot: the board, the bands, the verdicts, the live set, the multiples, the model and its test. */
+export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
+  const { board, multiples, medianAge, model, refTvl, validation } = buildBoard(snapshot);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
   const preToken = snapshot.protocols.filter(isPreToken);
@@ -754,6 +1114,14 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     }
     multiplesTable.push(...[...seen.values()].sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0)));
   }
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const bands = bootstrapBands(
+    board.map((r) => bySlug.get(r.slug)!),
+    snapshot,
+    medianAge,
+    refTvl,
+    model,
+  );
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -770,29 +1138,40 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     global_multiple: round4(multiples.global),
     global_sample: multiples.globalSample,
     median_age_days: medianAge,
+    ref_tvl_usd: refTvl,
+    validation,
     multiples: multiplesTable,
-    rows: board.map((r) => ({
-      rank: r.rank,
-      slug: r.slug,
-      name: r.name,
-      category: r.category,
-      chains: r.chains,
-      tvl_usd: r.tvl_usd,
-      change_7d: r.change_7d,
-      listed_at: r.listed_at,
-      age_days: r.age_days,
-      watchlist: r.watchlist,
-      implied_value_usd: r.implied_value_usd,
-      multiple: r.model.multiple,
-      multiple_source: r.model.multiple_source,
-      multiple_sample: r.model.multiple_sample,
-      multiple_weight: r.model.multiple_weight,
-      category_median: r.model.category_median,
-      growth_factor: r.model.growth_factor,
-      age_factor: r.model.age_factor,
-      age_days_used: r.model.age_days_used,
-      farm_steps: r.farm_steps,
-    })),
+    rows: board.map((r) => {
+      const band = bands.get(r.slug)!;
+      return {
+        rank: r.rank,
+        slug: r.slug,
+        name: r.name,
+        category: r.category,
+        chains: r.chains,
+        tvl_usd: r.tvl_usd,
+        change_7d: r.change_7d,
+        listed_at: r.listed_at,
+        age_days: r.age_days,
+        watchlist: r.watchlist,
+        implied_value_usd: r.implied_value_usd,
+        multiple: r.model.multiple,
+        multiple_source: r.model.multiple_source,
+        multiple_sample: r.model.multiple_sample,
+        multiple_weight: r.model.multiple_weight,
+        category_median: r.model.category_median,
+        growth_factor: r.model.growth_factor,
+        age_factor: r.model.age_factor,
+        age_days_used: r.model.age_days_used,
+        elasticity_factor: r.model.elasticity_factor,
+        band_low_usd: band.low,
+        band_high_usd: band.high,
+        rank_low: band.rankLow,
+        rank_high: band.rankHigh,
+        farm_verdict: farmVerdict(bySlug.get(r.slug)!, r.implied_value_usd, band.low),
+        farm_steps: r.farm_steps,
+      };
+    }),
     live,
   };
   return { board, radar };
