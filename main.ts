@@ -1,14 +1,16 @@
 // Token Launch Radar: the entrypoint (Node 22+, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>),
-// scores every eligible pre-token protocol with the category-median model in
-// lib/model.ts, writes the ranked board to /output/board.json and the
-// dashboard's data to /output/data.js, copies dashboard/ and screenshots/
-// into /output, and writes /output/dossier.json LAST with the vendored
-// make.fun library, exactly as the gate rebuilds it.
+// scores every eligible pre-token protocol with the credibility-weighted
+// category model in lib/model.ts (category-shrinkage-2: each category's
+// mcap/TVL median blended with the global median by its sample size),
+// writes the ranked board to /output/board.json and the dashboard's data
+// to /output/data.js, copies dashboard/ and screenshots/ into /output,
+// and writes /output/dossier.json LAST with the vendored make.fun
+// library, exactly as the gate rebuilds it.
 //
-// Deterministic: no clock, no randomness, every sort breaks ties by slug, and
-// files are copied in sorted name order. Two runs write byte-identical bytes.
+// Deterministic: no clock, no randomness, every sort breaks ties by slug,
+// and files are copied in sorted name order. Two runs write byte-identical bytes.
 //
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input ../input/snapshot.json
@@ -16,7 +18,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { MODEL_VERSION, boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -99,6 +101,6 @@ writeFileSync(
 );
 
 process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} beyond the watchlist, ${radar.excluded_total} excluded products, ${radar.live_size} live set aside)\n` +
+  `token radar [${MODEL_VERSION}]: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} beyond the watchlist, ${radar.excluded_total} excluded products, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

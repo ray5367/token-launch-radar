@@ -28,8 +28,8 @@
   <section class="hero">
     <div class="hero-copy">
       <h1>Every protocol with no token on record, ranked by what its record is worth.</h1>
-      <p>The watchlist is the floor, never the ceiling: all <b id="hero-watch">40</b> watchlist protocols are ranked, plus every other eligible pre-token protocol the watchlist leaves out, large ones included. Implied value follows from the snapshot's own figures — TVL, seven-day growth, and time run with no token — priced at the multiples the market already pays protocols <i>with</i> tokens. A model, not a promise; it never claims a token is coming.</p>
-      <p class="fine">Language matters: the snapshot records no token for these protocols. That is not proof none exists. Protocols whose token already trades are kept apart on the Live tab, shown at their market caps.</p>
+      <p>The watchlist is the floor, never the ceiling: all <b id="hero-watch">40</b> watchlist protocols are ranked, plus every other eligible pre-token protocol. Implied value follows from the snapshot's own TVL, seven-day growth and age, priced at credibility-weighted category multiples.</p>
+      <p class="fine">Language matters: the snapshot records no token for these protocols — not proof none exists. Live-token protocols are kept apart on the Live tab, at their market caps. The model never claims a token is coming.</p>
     </div>
     <div class="tiles" id="tiles" aria-label="Board facts"></div>
   </section>
@@ -37,7 +37,7 @@
   <section class="strip" aria-label="How the value is figured, in one line">
     <p class="strip-label">HOW THE VALUE IS FIGURED</p>
     <p class="formula">implied&nbsp;=&nbsp;TVL&nbsp;×&nbsp;category&nbsp;multiple&nbsp;×&nbsp;growth&nbsp;factor&nbsp;×&nbsp;age&nbsp;factor</p>
-    <p class="strip-note" id="strip-note">The category multiple is the median market-cap/TVL of token protocols in the same category.</p>
+    <p class="strip-note" id="strip-note">Each category multiple blends the category's own median market-cap/TVL with the global median, weighted by how many token protocols the category carries.</p>
   </section>
 
   <section class="controls" aria-label="Filter and sort the board">
@@ -67,6 +67,9 @@
     <div class="field check">
       <label class="check-label"><input type="checkbox" id="watchonly"> Watchlist only</label>
     </div>
+    <div class="field check">
+      <label class="check-label"><input type="checkbox" id="risingonly"> Rising 7d only</label>
+    </div>
     <div class="field">
       <span class="field-label" id="tab-label">Token status</span>
       <div class="tabs" role="group" aria-labelledby="tab-label">
@@ -80,7 +83,7 @@
   <section class="panel" id="board-panel">
     <div class="table-wrap">
       <table id="board-table">
-        <caption>Pre-token protocols, strongest implied value first. Click a column header to sort; click a row for its value breakdown and farm plan.</caption>
+        <caption>Strongest implied value first — click a header to sort, a row for its breakdown and farm plan. ★ watchlist · <i>early</i> = below the $50M floor.</caption>
         <thead>
           <tr>
             <th scope="col" aria-sort="descending"><button type="button" data-sort="rank">Rank <span aria-hidden="true">↓</span></button></th>
@@ -120,13 +123,13 @@
     <h2>How the value is figured</h2>
     <p>One function scores every row. No protocol name is special-cased, no row is hand-picked, and every input is a figure the snapshot itself carries.</p>
     <ol class="method">
-      <li><b>Price the category from the market.</b> For each category, take every protocol in the snapshot whose token already trades and divide its market cap by its TVL. The category multiple is the <i>median</i> of those ratios — medians, so one outlier cannot move the price. Categories with fewer than <span id="m-sample">5</span> token protocols use the global median instead, and the row says which.</li>
+      <li><b>Price each category from the market, credibility-weighted.</b> For each category, take every protocol in the snapshot whose token already trades and divide its market cap by its TVL. The category median is the <i>median</i> of those ratios — medians, so one outlier cannot move the price — winsorized to ×0.03…×1.25 <i>before</i> blending. The row's multiple then blends that median with the global median: multiple = w × category median + (1 − w) × global median, where w = n / (n + <span id="m-prior">5</span>) and n is the category's token-protocol count. A category with 15 priced protocols earns 75% weight on its own evidence; one with a single protocol earns 17% and leans on the global median; a category with none prices purely at the global median, and the row says which.</li>
       <li><b>Reward momentum, capped.</b> Seven-day TVL change is clamped to <span id="m-growth">−50%…+100%</span> and half its weight is applied: growth factor = 1 + 0.5 × clamped change. A protocol shrinking 50% keeps 0.75×; one doubling gets 1.5×. No report means no change.</li>
       <li><b>Reward a long no-token track record, on a log scale.</b> Age is the days from first listing to the snapshot date, capped at <span id="m-age">1,095</span> days. Age factor = 0.65 + 0.35 × ln(1 + age) / ln(1 + cap): the first year counts more than the fourth. A missing listing date uses the eligible set's median age, figured from the snapshot.</li>
       <li><b>Multiply and rank.</b> implied = TVL × multiple × growth factor × age factor, rounded to whole dollars. Ties break by slug, so the ranking is stable and reproducible.</li>
     </ol>
     <h3>Category multiples figured from this snapshot</h3>
-    <p class="fine">Median market-cap/TVL among token protocols in the category. Categories not listed use the global median.</p>
+    <p class="fine">Every category on the board, with its blended multiple, its token-protocol count n, its credibility weight, and its winsorized category median. Categories with n = 0 have no token protocol in the snapshot and price at the global median.</p>
     <div class="mult-grid" id="mult-grid"></div>
     <h3>What is left out, and why</h3>
     <p>Excluded from the ranking: any protocol that records a token (a market cap, a CoinGecko id, or a symbol), and any wrapped, staked, bridged or versioned product — Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking, Restaked BTC and CEX categories, names carrying a whole word <i>wrapped</i>, <i>staked</i> or <i>staking</i>, names ending in a version marker such as V2, and names beginning with an exchange name. A wrapped product of a token that already trades is not a launch waiting to happen. <span id="excluded-note"></span></p>

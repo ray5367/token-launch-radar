@@ -8,12 +8,25 @@
 // THE MODEL (every input is one of the snapshot's own figures; no protocol
 // name is ever special-cased):
 //
-//   multiple     = median(mcap_usd / tvl_usd) over the protocols WITH a token
-//                  in the same category, when that category has at least
-//                  MIN_CATEGORY_SAMPLE such protocols with mcap_usd > 0;
-//                  otherwise the median over ALL token protocols. The
-//                  multiple is winsorized to [MULTIPLE_MIN, MULTIPLE_MAX]
-//                  so a thin category cannot explode the board.
+//   categoryMedian = median(mcap_usd / tvl_usd) over the protocols WITH a
+//                    token in the same category (every category with at
+//                    least one such protocol), winsorized to
+//                    [MULTIPLE_MIN, MULTIPLE_MAX] BEFORE blending, so one
+//                    wild ratio cannot drag the blend. Categories with no
+//                    token protocol have no category median.
+//   globalMedian   = the same median over ALL token protocols, winsorized.
+//   weight         = n / (n + SHRINKAGE_PRIOR), where n is the category's
+//                    token-protocol count. This is credibility weighting:
+//                    a category with 15 priced protocols earns a 75%
+//                    weight on its own median, a category with 1 earns
+//                    17%, and a category with none earns 0% and prices
+//                    purely at the global median. The old hard rule (own
+//                    median only at n >= 5, global otherwise) priced 122
+//                    of 198 rows at one shared number and threw away every
+//                    thin category's evidence; shrinkage uses all of it,
+//                    damped by how thin it is.
+//   multiple       = weight * categoryMedian + (1 - weight) * globalMedian,
+//                    winsorized again to [MULTIPLE_MIN, MULTIPLE_MAX].
 //   growth       = clamp(change_7d, GROWTH_FLOOR, GROWTH_CAP); null counts 0.
 //   growthFactor = 1 + (growth / 100) * GROWTH_WEIGHT
 //   ageFactor    = AGE_FLOOR + AGE_RANGE * ln(1 + min(age_days, AGE_CAP))
@@ -61,7 +74,7 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard's "How the value is figured" panel. */
 export interface ModelConstants {
-  min_category_sample: number;
+  shrinkage_prior: number;
   multiple_min: number;
   multiple_max: number;
   growth_floor: number;
@@ -73,7 +86,7 @@ export interface ModelConstants {
 }
 
 export const MODEL: ModelConstants = {
-  min_category_sample: 5,
+  shrinkage_prior: 5,
   multiple_min: 0.03,
   multiple_max: 1.25,
   growth_floor: -50,
@@ -85,7 +98,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'category-median-1';
+export const MODEL_VERSION = 'category-shrinkage-2';
 
 /** How many live-token protocols the dashboard's Live view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -109,8 +122,10 @@ export interface BoardRow {
   implied_value_usd: number;
   model: {
     multiple: number;
-    multiple_source: 'category' | 'global';
+    multiple_source: 'blended' | 'global';
     multiple_sample: number;
+    multiple_weight: number;
+    category_median: number | null;
     growth_pct: number;
     growth_factor: number;
     age_factor: number;
@@ -133,8 +148,10 @@ export interface RadarRow {
   watchlist: boolean;
   implied_value_usd: number;
   multiple: number;
-  multiple_source: 'category' | 'global';
+  multiple_source: 'blended' | 'global';
   multiple_sample: number;
+  multiple_weight: number;
+  category_median: number | null;
   growth_factor: number;
   age_factor: number;
   age_days_used: number;
@@ -158,7 +175,9 @@ export interface MultipleEntry {
   category: string;
   multiple: number;
   sample: number;
-  source: 'category' | 'global';
+  weight: number;
+  category_median: number | null;
+  source: 'blended' | 'global';
 }
 
 /** Everything the dashboard needs: the board, the live set, the multiples, the model. */
@@ -256,10 +275,12 @@ export function isRankable(p: SnapshotProtocol): boolean {
  * The mcap/TVL multiple for every category, plus the global fallback.
  * Ratios use only protocols with a positive market cap and positive TVL: a
  * recorded market cap of exactly 0 is no market price and would drag the
- * median to zero. Categories with fewer than MIN_CATEGORY_SAMPLE ratios fall
- * back to the global median, and the fallback is recorded per row.
+ * median to zero. Every category with at least one ratio keeps its median,
+ * winsorized before blending; there is no minimum-sample gate, because the
+ * credibility weight in multipleFor already damps thin categories. The
+ * global median is the same median over all ratios, winsorized the same way.
  */
-export function deriveMultiples(protocols: SnapshotProtocol[], model: ModelConstants): { byCategory: Map<string, { multiple: number; sample: number }>; global: number; globalSample: number } {
+export function deriveMultiples(protocols: SnapshotProtocol[], model: ModelConstants): { byCategory: Map<string, { median: number; sample: number }>; global: number; globalSample: number } {
   const byCategory = new Map<string, number[]>();
   const all: number[] = [];
   for (const p of protocols) {
@@ -273,18 +294,32 @@ export function deriveMultiples(protocols: SnapshotProtocol[], model: ModelConst
   }
   const clamp = (n: number): number => Math.min(model.multiple_max, Math.max(model.multiple_min, n));
   const global = all.length > 0 ? clamp(median(all)) : 0.25;
-  const out = new Map<string, { multiple: number; sample: number }>();
+  const out = new Map<string, { median: number; sample: number }>();
   for (const [key, ratios] of byCategory) {
-    if (ratios.length >= model.min_category_sample) out.set(key, { multiple: clamp(median(ratios)), sample: ratios.length });
+    out.set(key, { median: clamp(median(ratios)), sample: ratios.length });
   }
   return { byCategory: out, global, globalSample: all.length };
 }
 
-/** The multiple one protocol gets: its category's median, or the global median. */
-export function multipleFor(p: SnapshotProtocol, multiples: ReturnType<typeof deriveMultiples>): { multiple: number; source: 'category' | 'global'; sample: number } {
-  const entry = p.category === null ? undefined : multiples.byCategory.get(p.category);
-  if (entry !== undefined) return { multiple: entry.multiple, source: 'category', sample: entry.sample };
-  return { multiple: multiples.global, source: 'global', sample: multiples.globalSample };
+/**
+ * The multiple one protocol gets: its category's median credibility-weighted
+ * against the global median. weight = n / (n + shrinkage_prior), so the
+ * blend trusts a well-populated category and leans on the global median for
+ * a thin or empty one. The blend is winsorized again so no combination can
+ * leave [MULTIPLE_MIN, MULTIPLE_MAX]. A category with no token protocol at
+ * all (or a null category with no ratios) prices purely at the global median
+ * with weight 0.
+ */
+export function multipleFor(p: SnapshotProtocol, multiples: ReturnType<typeof deriveMultiples>, model: ModelConstants): { multiple: number; source: 'blended' | 'global'; sample: number; weight: number; categoryMedian: number | null } {
+  const key = p.category ?? '(uncategorized)';
+  const entry = multiples.byCategory.get(key);
+  if (entry === undefined) {
+    return { multiple: multiples.global, source: 'global', sample: 0, weight: 0, categoryMedian: null };
+  }
+  const weight = entry.sample / (entry.sample + model.shrinkage_prior);
+  const blended = weight * entry.median + (1 - weight) * multiples.global;
+  const multiple = Math.min(model.multiple_max, Math.max(model.multiple_min, blended));
+  return { multiple, source: 'blended', sample: entry.sample, weight, categoryMedian: entry.median };
 }
 
 /** The three factors and the implied value one protocol gets. */
@@ -294,17 +329,17 @@ export function impliedValue(
   multiples: ReturnType<typeof deriveMultiples>,
   medianAge: number,
   model: ModelConstants,
-): { implied: number; multiple: number; source: 'category' | 'global'; sample: number; growthPct: number; growthFactor: number; ageFactor: number; age: number | null; ageUsed: number } {
+): { implied: number; multiple: number; source: 'blended' | 'global'; sample: number; weight: number; categoryMedian: number | null; growthPct: number; growthFactor: number; ageFactor: number; age: number | null; ageUsed: number } {
   const age = ageDays(asOf, p.listed_at);
   const ageUsed = age ?? medianAge;
-  const { multiple, source, sample } = multipleFor(p, multiples);
+  const { multiple, source, sample, weight, categoryMedian } = multipleFor(p, multiples, model);
   const rawGrowth = p.change_7d !== null && Number.isFinite(p.change_7d) ? p.change_7d : 0;
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthFactor = 1 + (growthPct / 100) * model.growth_weight;
   const cappedAge = Math.min(Math.max(ageUsed, 0), model.age_cap_days);
   const ageFactor = model.age_floor + model.age_range * (Math.log1p(cappedAge) / Math.log1p(model.age_cap_days));
   const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthFactor * ageFactor));
-  return { implied, multiple, source, sample, growthPct, growthFactor, ageFactor, age, ageUsed };
+  return { implied, multiple, source, sample, weight, categoryMedian, growthPct, growthFactor, ageFactor, age, ageUsed };
 }
 
 // --- Farm plans: category playbooks applied to each protocol's own record. ---
@@ -679,6 +714,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): {
       multiple: s.v.multiple,
       multiple_source: s.v.source,
       multiple_sample: s.v.sample,
+      multiple_weight: s.v.weight,
+      category_median: s.v.categoryMedian,
       growth_pct: s.v.growthPct,
       growth_factor: s.v.growthFactor,
       age_factor: s.v.ageFactor,
@@ -695,9 +732,28 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
   const preToken = snapshot.protocols.filter(isPreToken);
-  const multiplesTable: MultipleEntry[] = [...multiples.byCategory.entries()]
-    .map(([category, e]) => ({ category, multiple: round4(e.multiple), sample: e.sample, source: 'category' as const }))
-    .sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  const multiplesTable: MultipleEntry[] = [];
+  {
+    // One entry per category on the board, priced exactly as its rows are:
+    // the blended multiple, the category's token-protocol count, the
+    // credibility weight, and the winsorized category median (null when the
+    // category has no token protocol and prices at the global median).
+    const seen = new Map<string, MultipleEntry>();
+    for (const r of board) {
+      const category = r.category ?? '(uncategorized)';
+      if (!seen.has(category)) {
+        seen.set(category, {
+          category,
+          multiple: round4(r.model.multiple),
+          sample: r.model.multiple_sample,
+          weight: round4(r.model.multiple_weight),
+          category_median: r.model.category_median === null ? null : round4(r.model.category_median),
+          source: r.model.multiple_source,
+        });
+      }
+    }
+    multiplesTable.push(...[...seen.values()].sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0)));
+  }
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -730,6 +786,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
       multiple: r.model.multiple,
       multiple_source: r.model.multiple_source,
       multiple_sample: r.model.multiple_sample,
+      multiple_weight: r.model.multiple_weight,
+      category_median: r.model.category_median,
       growth_factor: r.model.growth_factor,
       age_factor: r.model.age_factor,
       age_days_used: r.model.age_days_used,
