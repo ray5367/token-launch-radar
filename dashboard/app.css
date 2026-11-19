@@ -192,6 +192,11 @@ tr.top3 .rank { color: var(--accent); }
 .mult-cell.global { border-color: rgba(251, 191, 36, 0.4); }
 .mult-cell.global b { color: var(--amber); }
 
+/* Validation tables (walk-forward folds, sensitivity moves): compact, mono numbers. */
+.mini th, .mini td { padding: 6px 10px; font-size: 13px; }
+.mini td.num { font-family: var(--font-num); white-space: nowrap; }
+.mini td.neg { color: var(--neg); }
+
 .foot { padding: var(--s5) 0 0; color: var(--faint); font-size: 13px; }
 .foot p { max-width: 90ch; }
 

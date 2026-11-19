@@ -105,6 +105,7 @@ writeFileSync(
 process.stdout.write(
   `token radar [${MODEL_VERSION}]: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} beyond the watchlist, ${radar.excluded_total} excluded products, ${radar.live_size} live set aside)\n` +
     `token radar: fitted prior ${radar.model.shrinkage_prior}, growth weight ${radar.model.growth_weight}, slope ${radar.model.elasticity_slope} on ${radar.validation.fit_protocols} protocols; ` +
-    `holdout n=${radar.validation.holdout.n}: median log error ${radar.validation.holdout.median_abs_log_error.toFixed(4)} vs flat ${radar.validation.holdout_baseline.median_abs_log_error.toFixed(4)}, wins ${radar.validation.holdout.wins}/${radar.validation.holdout.n}\n` +
+    `holdout n=${radar.validation.holdout.n}: median log error ${radar.validation.holdout.median_abs_log_error.toFixed(4)} vs flat ${radar.validation.holdout_baseline.median_abs_log_error.toFixed(4)}, wins ${radar.validation.holdout.wins}/${radar.validation.holdout.n}; ` +
+    `walk-forward pooled n=${radar.validation.walk_forward.pooled.n}: median log error ${radar.validation.walk_forward.pooled.median_abs_log_error.toFixed(4)} vs flat ${radar.validation.walk_forward.pooled_baseline.median_abs_log_error.toFixed(4)}, wins ${radar.validation.walk_forward.pooled.wins}/${radar.validation.walk_forward.pooled.n}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );

@@ -59,6 +59,22 @@
 // medians throughout; the mean error is reported alongside, and it favours
 // heavier shrinkage — the dashboard says so rather than hiding it.
 //
+// WALK-FORWARD IN LISTING TIME: the same fitted constants are also tested
+// the way time actually arrives. The 95 token protocols that carry a
+// listed_at date are ordered by that date, and the model is run in three
+// expanding windows — trained on the earliest quarter, half, then three
+// quarters of listings, and tested on the next quarter of listings each
+// time, with the medians, the median age and the reference TVL refit on the
+// training window alone. A model that only fits one slug-ordered split
+// cannot hide behind it; the dashboard shows every fold and the pooled
+// error against the same flat baseline.
+//
+// SENSITIVITY: each fitted constant is moved one grid step either way
+// (prior 13/34, growth weight 0.5/1.0, slope 0.4/0.6) and the fit-set
+// leave-one-out error and the holdout error are recomputed, so the
+// dashboard shows what the choice of constants is actually worth — and
+// whether any neighbouring cell would have tested better.
+//
 // UNCERTAINTY: every row carries a band from 200 bootstrap refits
 // (bootstrapBands): the 128 token protocols' ratios are resampled within
 // each category with a fixed seed, the medians are recomputed, and each
@@ -80,8 +96,12 @@
 // (farmVerdict): the sunk gas plus a stated 5% risk charge on the deployed
 // capital is set against the row's implied value, giving the allocation
 // that breaks even and a verdict — farm, thin or skip — from a stated rule
-// on that break-even share and the row's uncertainty band. The arithmetic
-// is shown in the detail view, not just the verdict word.
+// on that break-even share and the row's uncertainty band. The netting is
+// also shown in dollars at the stated plausible single-farmer allocation
+// (0.001% of the implied value): the allocation minus the expected cost.
+// That net carries the cost side of the verdict in dollars — a thin row
+// either nets negative at that share or carries a band too wide for farm.
+// The arithmetic is shown in the detail view, not just the verdict word.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -141,7 +161,7 @@ export const MODEL: ModelConstants = {
  * and are not fitted. MODEL_VERSION names the fitted model the dashboard
  * shows.
  */
-export const MODEL_VERSION = 'elasticity-fitted-1';
+export const MODEL_VERSION = 'elasticity-fitted-2';
 
 /** The grid fitConstants searches, in the order it is searched (first win on ties). */
 export const FIT_GRID = {
@@ -159,7 +179,41 @@ export interface ErrorSummary {
   wins: number;
 }
 
-/** The whole validation story, computed by the program from the snapshot: the split, the grid, the selection, the held-out test, and the leave-one-out record. */
+/** One walk-forward fold: trained on listings up to a date, tested on the next quarter of listings. */
+export interface WalkForwardFold {
+  fold: number;
+  train_n: number;
+  test_n: number;
+  train_through: string;
+  model_median: number;
+  baseline_median: number;
+  model_mean: number;
+  baseline_mean: number;
+  model_wins: number;
+  baseline_wins: number;
+  model_typical: number;
+  baseline_typical: number;
+}
+
+/** The walk-forward test: three expanding windows in listing time, plus the pooled error over all folds. */
+export interface WalkForwardReport {
+  dated_protocols: number;
+  rule: string;
+  folds: WalkForwardFold[];
+  pooled: ErrorSummary;
+  pooled_baseline: ErrorSummary;
+}
+
+/** One sensitivity row: the chosen constants, or one constant moved one grid step, with both errors recomputed. */
+export interface SensitivityRow {
+  label: string;
+  fit_loo_median: number;
+  holdout_median: number;
+  fit_delta: number;
+  holdout_delta: number;
+}
+
+/** The whole validation story, computed by the program from the snapshot: the split, the grid, the selection, the held-out test, the walk-forward test, the sensitivity table, and the leave-one-out record. */
 export interface ValidationReport {
   token_protocols: number;
   fit_protocols: number;
@@ -176,11 +230,13 @@ export interface ValidationReport {
   holdout_baseline: ErrorSummary;
   loo_all: ErrorSummary;
   loo_all_baseline: ErrorSummary;
+  walk_forward: WalkForwardReport;
+  sensitivity: SensitivityRow[];
   bootstrap_refits: number;
   bootstrap_seed: number;
 }
 
-/** A farm plan netted to a verdict: the costs, the break-even share, and the rule's word. */
+/** A farm plan netted to a verdict: the costs, the break-even share, the rule's word, and the net dollars at the stated plausible allocation (0.001% of the implied value). */
 export interface FarmVerdict {
   verdict: 'farm' | 'thin' | 'skip';
   expected_cost_usd: number;
@@ -189,10 +245,12 @@ export interface FarmVerdict {
   capital_usd: number;
   break_even_pct: number;
   band_low_ratio: number;
+  plausible_alloc_usd: number;
+  net_usd: number;
 }
 
-/** How many live-token protocols the dashboard's Live view carries, by market cap. */
-export const LIVE_ROWS = 24;
+/** How many live-token protocols the dashboard's Live view carries: the whole traded comp set that prices the board, by market cap. */
+export const LIVE_ROWS = 128;
 
 /** One row of board.json: the ranked board's row. */
 export interface BoardRow {
@@ -504,6 +562,115 @@ function looErrors(pool: SnapshotProtocol[], asOf: string, medianAge: number, re
   return { model: modelErrs, baseline: baselineErrs };
 }
 
+/** Held-out errors: each held-out protocol predicted once from medians fitted on the fit set alone, against the flat baseline on the same medians. */
+function holdoutErrors(fit: SnapshotProtocol[], holdout: SnapshotProtocol[], asOf: string, medianAge: number, refTvl: number, model: ModelConstants): { model: number[]; baseline: number[] } {
+  const multiples = deriveMultiples(fit, model);
+  const modelErrs: number[] = [];
+  const baselineErrs: number[] = [];
+  for (const p of holdout) {
+    modelErrs.push(absLogError(impliedValue(p, asOf, multiples, medianAge, model, refTvl).implied, p.mcap_usd!));
+    baselineErrs.push(absLogError(baselinePrediction(p, multiples), p.mcap_usd!));
+  }
+  return { model: modelErrs, baseline: baselineErrs };
+}
+
+/**
+ * Walk-forward in listing time: the token protocols that carry a listed_at
+ * date, ordered by that date, run in three expanding windows. Each fold
+ * trains on the earliest quarter / half / three quarters of listings and
+ * tests on the next quarter, with the medians, the median age and the
+ * reference TVL refit on the training window alone and the fitted constants
+ * held fixed. Protocols with no listed_at date cannot be ordered in time
+ * and sit outside this test; the count is reported, not hidden.
+ */
+export function walkForward(snapshot: Snapshot, model: ModelConstants): WalkForwardReport {
+  const dated = fittableProtocols(snapshot.protocols)
+    .filter((p) => p.listed_at !== null)
+    .sort((a, b) => (a.listed_at! < b.listed_at! ? -1 : a.listed_at! > b.listed_at! ? 1 : a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+  const emptySummary = (n: number): ErrorSummary => ({ n, median_abs_log_error: 0, mean_abs_log_error: 0, typical_multiple: 1, wins: 0 });
+  const base: WalkForwardReport = {
+    dated_protocols: dated.length,
+    rule: 'ordered by listed_at, three expanding windows: train on the earliest quarter / half / three quarters, test on the next quarter',
+    folds: [],
+    pooled: emptySummary(0),
+    pooled_baseline: emptySummary(0),
+  };
+  if (dated.length < 12) return base;
+  const cuts = [Math.floor(dated.length / 4), Math.floor(dated.length / 2), Math.floor((3 * dated.length) / 4)];
+  const pooledModel: number[] = [];
+  const pooledBase: number[] = [];
+  cuts.forEach((cut, i) => {
+    const train = dated.slice(0, cut);
+    const test = dated.slice(cut, cuts[i + 1] ?? dated.length);
+    if (train.length === 0 || test.length === 0) return;
+    const multiples = deriveMultiples(train, model);
+    const ages = train.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
+    const trainAge = ages.length > 0 ? Math.round(median(ages)) : 365;
+    const trainRef = median(train.map((p) => p.tvl_usd));
+    const modelErrs: number[] = [];
+    const baseErrs: number[] = [];
+    for (const p of test) {
+      modelErrs.push(absLogError(impliedValue(p, snapshot.as_of, multiples, trainAge, model, trainRef).implied, p.mcap_usd!));
+      baseErrs.push(absLogError(baselinePrediction(p, multiples), p.mcap_usd!));
+    }
+    pooledModel.push(...modelErrs);
+    pooledBase.push(...baseErrs);
+    const s = summarize(modelErrs, baseErrs);
+    base.folds.push({
+      fold: base.folds.length + 1,
+      train_n: train.length,
+      test_n: test.length,
+      train_through: train[train.length - 1]!.listed_at!,
+      model_median: s.model.median_abs_log_error,
+      baseline_median: s.baseline.median_abs_log_error,
+      model_mean: s.model.mean_abs_log_error,
+      baseline_mean: s.baseline.mean_abs_log_error,
+      model_wins: s.model.wins,
+      baseline_wins: s.baseline.wins,
+      model_typical: s.model.typical_multiple,
+      baseline_typical: s.baseline.typical_multiple,
+    });
+  });
+  const pooled = summarize(pooledModel, pooledBase);
+  base.pooled = pooled.model;
+  base.pooled_baseline = pooled.baseline;
+  return base;
+}
+
+/**
+ * Sensitivity: each fitted constant moved one grid step either way, the
+ * fit-set leave-one-out error and the holdout error recomputed for each
+ * move. The chosen row leads, with zero deltas; a negative delta on a move
+ * would mean that neighbour tested better, and the table shows it rather
+ * than hiding it.
+ */
+export function sensitivity(snapshot: Snapshot, fitted: ModelConstants, fit: SnapshotProtocol[], holdout: SnapshotProtocol[], medianAge: number, refTvl: number): SensitivityRow[] {
+  const male = (errs: number[]): number => (errs.length > 0 ? median(errs) : 0);
+  const fitLooMale = male(looErrors(fit, snapshot.as_of, medianAge, refTvl, fitted).model);
+  const holdMale = male(holdoutErrors(fit, holdout, snapshot.as_of, medianAge, refTvl, fitted).model);
+  const rows: SensitivityRow[] = [{
+    label: `chosen (prior ${fitted.shrinkage_prior}, growth ${fitted.growth_weight}, slope ${fitted.elasticity_slope})`,
+    fit_loo_median: fitLooMale,
+    holdout_median: holdMale,
+    fit_delta: 0,
+    holdout_delta: 0,
+  }];
+  const moves: { label: string; model: ModelConstants }[] = [
+    { label: `prior ${fitted.shrinkage_prior === 1 ? 2 : FIT_GRID.shrinkage_priors[Math.max(0, FIT_GRID.shrinkage_priors.indexOf(fitted.shrinkage_prior) - 1)]}`, model: { ...fitted, shrinkage_prior: FIT_GRID.shrinkage_priors[Math.max(0, FIT_GRID.shrinkage_priors.indexOf(fitted.shrinkage_prior) - 1)]! } },
+    { label: `prior ${FIT_GRID.shrinkage_priors[Math.min(FIT_GRID.shrinkage_priors.length - 1, FIT_GRID.shrinkage_priors.indexOf(fitted.shrinkage_prior) + 1)]}`, model: { ...fitted, shrinkage_prior: FIT_GRID.shrinkage_priors[Math.min(FIT_GRID.shrinkage_priors.length - 1, FIT_GRID.shrinkage_priors.indexOf(fitted.shrinkage_prior) + 1)]! } },
+    { label: `growth ${FIT_GRID.growth_weights[Math.max(0, FIT_GRID.growth_weights.indexOf(fitted.growth_weight) - 1)]}`, model: { ...fitted, growth_weight: FIT_GRID.growth_weights[Math.max(0, FIT_GRID.growth_weights.indexOf(fitted.growth_weight) - 1)]! } },
+    { label: `growth ${FIT_GRID.growth_weights[Math.min(FIT_GRID.growth_weights.length - 1, FIT_GRID.growth_weights.indexOf(fitted.growth_weight) + 1)]}`, model: { ...fitted, growth_weight: FIT_GRID.growth_weights[Math.min(FIT_GRID.growth_weights.length - 1, FIT_GRID.growth_weights.indexOf(fitted.growth_weight) + 1)]! } },
+    { label: `slope ${FIT_GRID.elasticity_slopes[Math.max(0, FIT_GRID.elasticity_slopes.indexOf(fitted.elasticity_slope) - 1)]}`, model: { ...fitted, elasticity_slope: FIT_GRID.elasticity_slopes[Math.max(0, FIT_GRID.elasticity_slopes.indexOf(fitted.elasticity_slope) - 1)]! } },
+    { label: `slope ${FIT_GRID.elasticity_slopes[Math.min(FIT_GRID.elasticity_slopes.length - 1, FIT_GRID.elasticity_slopes.indexOf(fitted.elasticity_slope) + 1)]}`, model: { ...fitted, elasticity_slope: FIT_GRID.elasticity_slopes[Math.min(FIT_GRID.elasticity_slopes.length - 1, FIT_GRID.elasticity_slopes.indexOf(fitted.elasticity_slope) + 1)]! } },
+  ];
+  for (const m of moves) {
+    const f = male(looErrors(fit, snapshot.as_of, medianAge, refTvl, m.model).model);
+    const h = male(holdoutErrors(fit, holdout, snapshot.as_of, medianAge, refTvl, m.model).model);
+    rows.push({ label: m.label, fit_loo_median: f, holdout_median: h, fit_delta: f - fitLooMale, holdout_delta: h - holdMale });
+  }
+  return rows;
+}
+
 /**
  * Fit the shrinkage prior, the growth weight and the elasticity slope, and
  * test the fitted model on protocols it never saw. The fit set chooses the
@@ -518,7 +685,7 @@ function looErrors(pool: SnapshotProtocol[], asOf: string, medianAge: number, re
 export function fitConstants(snapshot: Snapshot, medianAge: number, refTvl: number): { model: ModelConstants; validation: ValidationReport } {
   const pool = fittableProtocols(snapshot.protocols);
   const empty = (n: number): ErrorSummary => ({ n, median_abs_log_error: 0, mean_abs_log_error: 0, typical_multiple: 1, wins: 0 });
-  const report = (model: ModelConstants, fitLoo: { model: ErrorSummary; baseline: ErrorSummary }, hold: { model: ErrorSummary; baseline: ErrorSummary }, all: { model: ErrorSummary; baseline: ErrorSummary }, fitN: number, holdN: number, cells: number): ValidationReport => ({
+  const report = (model: ModelConstants, fitLoo: { model: ErrorSummary; baseline: ErrorSummary }, hold: { model: ErrorSummary; baseline: ErrorSummary }, all: { model: ErrorSummary; baseline: ErrorSummary }, fitN: number, holdN: number, cells: number, wf: WalkForwardReport, sens: SensitivityRow[]): ValidationReport => ({
     token_protocols: pool.length,
     fit_protocols: fitN,
     holdout_protocols: holdN,
@@ -534,12 +701,15 @@ export function fitConstants(snapshot: Snapshot, medianAge: number, refTvl: numb
     holdout_baseline: hold.baseline,
     loo_all: all.model,
     loo_all_baseline: all.baseline,
+    walk_forward: wf,
+    sensitivity: sens,
     bootstrap_refits: BOOTSTRAP_REFITS,
     bootstrap_seed: BOOTSTRAP_SEED,
   });
   if (pool.length < 5) {
     const zero = { model: empty(0), baseline: empty(0) };
-    return { model: MODEL, validation: report(MODEL, zero, zero, zero, 0, 0, 0) };
+    const wfEmpty: WalkForwardReport = { dated_protocols: 0, rule: 'ordered by listed_at, three expanding windows', folds: [], pooled: empty(0), pooled_baseline: empty(0) };
+    return { model: MODEL, validation: report(MODEL, zero, zero, zero, 0, 0, 0, wfEmpty, []) };
   }
   const { fit, holdout } = splitFitHoldout(pool);
   let best: { model: ModelConstants; male: number } | null = null;
@@ -558,17 +728,13 @@ export function fitConstants(snapshot: Snapshot, medianAge: number, refTvl: numb
   const fitted = best!.model;
   const fitErrs = looErrors(fit, snapshot.as_of, medianAge, refTvl, fitted);
   const fitSummary = summarize(fitErrs.model, fitErrs.baseline);
-  const fitMultiples = deriveMultiples(fit, fitted);
-  const holdModel: number[] = [];
-  const holdBase: number[] = [];
-  for (const p of holdout) {
-    holdModel.push(absLogError(impliedValue(p, snapshot.as_of, fitMultiples, medianAge, fitted, refTvl).implied, p.mcap_usd!));
-    holdBase.push(absLogError(baselinePrediction(p, fitMultiples), p.mcap_usd!));
-  }
-  const holdSummary = summarize(holdModel, holdBase);
+  const holdErrs = holdoutErrors(fit, holdout, snapshot.as_of, medianAge, refTvl, fitted);
+  const holdSummary = summarize(holdErrs.model, holdErrs.baseline);
   const allErrs = looErrors(pool, snapshot.as_of, medianAge, refTvl, fitted);
   const allSummary = summarize(allErrs.model, allErrs.baseline);
-  return { model: fitted, validation: report(fitted, fitSummary, holdSummary, allSummary, fit.length, holdout.length, cells) };
+  const wf = walkForward(snapshot, fitted);
+  const sens = sensitivity(snapshot, fitted, fit, holdout, medianAge, refTvl);
+  return { model: fitted, validation: report(fitted, fitSummary, holdSummary, allSummary, fit.length, holdout.length, cells, wf, sens) };
 }
 
 // --- Uncertainty: bootstrap bands and rank ranges. ---
@@ -983,9 +1149,13 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
  * wallets), so farm needs a break-even share at most 0.001% with the band's
  * low end still holding three quarters of the point estimate; thin needs
  * at most 0.01% (ten times a plausible share) with the low end holding
- * half; anything else is a skip. Every input is the row's own figures; no
- * name is special-cased. On this snapshot no row reaches skip: costs are
- * small against every implied value, and the thin rows are the
+ * half; anything else is a skip. The net dollars at that plausible
+ * allocation — the allocation minus the expected cost — are carried too:
+ * they show the cost side of the verdict in dollars. A thin row either
+ * nets negative at that share or carries a band too wide for farm (its
+ * break-even share alone would have passed). Every input is the row's own
+ * figures; no name is special-cased. On this snapshot no row reaches skip:
+ * costs are small against every implied value, and the thin rows are the
  * expensive-or-uncertain ones.
  */
 export function farmVerdict(p: SnapshotProtocol, impliedUsd: number, bandLowUsd: number): FarmVerdict {
@@ -996,6 +1166,7 @@ export function farmVerdict(p: SnapshotProtocol, impliedUsd: number, bandLowUsd:
   const breakEvenPct = impliedUsd > 0 ? (100 * expectedCost) / impliedUsd : 100;
   const bandLowRatio = impliedUsd > 0 ? bandLowUsd / impliedUsd : 0;
   const verdict = breakEvenPct <= 0.001 && bandLowRatio >= 0.75 ? 'farm' : breakEvenPct <= 0.01 && bandLowRatio >= 0.5 ? 'thin' : 'skip';
+  const plausibleAlloc = impliedUsd * 0.00001;
   return {
     verdict,
     expected_cost_usd: Math.round(expectedCost * 100) / 100,
@@ -1004,6 +1175,8 @@ export function farmVerdict(p: SnapshotProtocol, impliedUsd: number, bandLowUsd:
     capital_usd: capital + small,
     break_even_pct: breakEvenPct,
     band_low_ratio: bandLowRatio,
+    plausible_alloc_usd: Math.round(plausibleAlloc * 100) / 100,
+    net_usd: Math.round((plausibleAlloc - expectedCost) * 100) / 100,
   };
 }
 

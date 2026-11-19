@@ -28,7 +28,7 @@
   <section class="hero">
     <div class="hero-copy">
       <h1>Every protocol with no token on record, ranked by what its record is worth.</h1>
-      <p>The watchlist is the floor, never the ceiling: all <b id="hero-watch">40</b> watchlist protocols are ranked, plus every other eligible pre-token protocol. Implied value follows from the snapshot's own TVL, seven-day growth and age, priced at credibility-weighted category multiples — with the model's constants fitted on the snapshot's token protocols and tested on a held-out split, not asserted.</p>
+      <p>The watchlist is the floor, never the ceiling: all <b id="hero-watch">40</b> watchlist protocols are ranked, plus every other eligible pre-token protocol. Implied value follows from the snapshot's own TVL, seven-day growth and age, priced at credibility-weighted category multiples — with the model's constants fitted on the snapshot's token protocols and tested on a held-out split and walk-forward in listing time, not asserted.</p>
       <p class="fine">Language matters: the snapshot records no token for these protocols — not proof none exists. Live-token protocols are kept apart on the Live tab, at their market caps. The model never claims a token is coming.</p>
     </div>
     <div class="tiles" id="tiles" aria-label="Board facts"></div>
@@ -44,6 +44,7 @@
     <p class="test-label">THE MODEL, TESTED — NOT ASSERTED</p>
     <p class="test-line" id="test-line">The model's constants were fitted on the snapshot's token protocols and tested on protocols held out before fitting.</p>
     <p class="test-note" id="test-note"></p>
+    <p class="test-note" id="test-wf"></p>
   </section>
 
   <section class="controls" aria-label="Filter and sort the board">
@@ -75,6 +76,15 @@
     </div>
     <div class="field check">
       <label class="check-label"><input type="checkbox" id="risingonly"> Rising 7d only</label>
+    </div>
+    <div class="field">
+      <label for="verdict">Farm verdict</label>
+      <select id="verdict">
+        <option value="all">All verdicts</option>
+        <option value="farm">Farm</option>
+        <option value="thin">Thin</option>
+        <option value="skip">Skip</option>
+      </select>
     </div>
     <div class="field">
       <span class="field-label" id="tab-label">Token status</span>
@@ -138,6 +148,12 @@
     </ol>
     <h3>The held-out test</h3>
     <p id="test-detail">The test, in full, is rendered here from the program's own validation record.</p>
+    <h3 id="wf-head">Walk-forward in listing time</h3>
+    <p id="wf-detail">The walk-forward test, in full, is rendered here from the program's own validation record.</p>
+    <div class="table-wrap mini" id="wf-table"></div>
+    <h3>Sensitivity: one constant moved at a time</h3>
+    <p id="sens-detail">The sensitivity table is rendered here from the program's own validation record.</p>
+    <div class="table-wrap mini" id="sens-table"></div>
     <h3>Uncertainty on every estimate</h3>
     <p>Each row's band is the 10th–90th percentile of <span id="m-refits">200</span> bootstrap refits: the token protocols' ratios are resampled within their categories with a fixed seed, the medians are recomputed, and the row is repriced with the fitted constants held fixed. The band and the rank range (the row's best and worst rank across the refits) sit beside every value on the board and in the detail view. A row priced from a thin category swings wide; a row priced from a deep one stays put. The seed is fixed, so the bands reproduce exactly.</p>
     <h3>What the test does not show</h3>
@@ -148,7 +164,7 @@
     <h3>What is left out, and why</h3>
     <p>Excluded from the ranking: any protocol that records a token (a market cap, a CoinGecko id, or a symbol), and any wrapped, staked, bridged or versioned product — Bridge, Canonical Bridge, Liquid Staking, Liquid Restaking, Restaked BTC and CEX categories, names carrying a whole word <i>wrapped</i>, <i>staked</i> or <i>staking</i>, names ending in a version marker such as V2, and names beginning with an exchange name. A wrapped product of a token that already trades is not a launch waiting to happen. <span id="excluded-note"></span></p>
     <h3>Farm plans, netted</h3>
-    <p>Each row's plan is generated from that protocol's own category, chains, TVL and age: the category picks the venue and the risk, the TVL picks the capital, the first chain picks the gas budget, the age picks the holding period. Steps name amounts, costs and time. They are the standard farming playbook for the category and chain — the snapshot carries no points program, and no plan claims one exists. Each plan is then netted to a verdict: sunk gas (two gas budgets, farming plus exit) plus a stated 5% risk charge on the deployed capital, set against the row's implied value, gives the allocation that breaks even. A single farmer's allocation is plausibly around 0.001% of the implied value — a single-digit percent of supply split among thousands of wallets — so <b>farm</b> needs a break-even share at most 0.001% with the band's low end holding three quarters of the value; <b>thin</b> needs at most 0.01% with the low end holding half; anything else is a <b>skip</b>. The detail view shows the arithmetic, not just the word.</p>
+    <p>Each row's plan is generated from that protocol's own category, chains, TVL and age: the category picks the venue and the risk, the TVL picks the capital, the first chain picks the gas budget, the age picks the holding period. Steps name amounts, costs and time. They are the standard farming playbook for the category and chain — the snapshot carries no points program, and no plan claims one exists. Each plan is then netted to a verdict: sunk gas (two gas budgets, farming plus exit) plus a stated 5% risk charge on the deployed capital, set against the row's implied value, gives the allocation that breaks even. A single farmer's allocation is plausibly around 0.001% of the implied value — a single-digit percent of supply split among thousands of wallets — so <b>farm</b> needs a break-even share at most 0.001% with the band's low end holding three quarters of the value; <b>thin</b> needs at most 0.01% with the low end holding half; anything else is a <b>skip</b>. The Farm column nets every row in dollars too: the allocation at 0.001% minus the expected cost, so each row shows its net, not just its verdict word. The detail view shows the arithmetic, not just the word.</p>
   </section>
 
   <footer class="foot">

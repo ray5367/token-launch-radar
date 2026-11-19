@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
 
-  var state = { q: '', category: 'all', chain: 'all', minTvl: 0, watchOnly: false, risingOnly: false, tab: 'pre', sort: 'rank', dir: 1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', minTvl: 0, watchOnly: false, risingOnly: false, verdict: 'all', tab: 'pre', sort: 'rank', dir: 1, selected: null };
   var $ = function (id) { return document.getElementById(id); };
 
   // ---- Formatting ---------------------------------------------------------
@@ -62,6 +62,7 @@
   function visibleRows() {
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
+      if (state.verdict !== 'all' && r.farm_verdict.verdict !== state.verdict) return false;
       if (state.watchOnly && !r.watchlist) return false;
       if (state.risingOnly && !(r.change_7d !== null && r.change_7d > 0)) return false;
       if (state.minTvl > 0 && r.tvl_usd < state.minTvl) return false;
@@ -116,7 +117,17 @@
   // Every number below is computed by main.ts from the snapshot (see
   // lib/model.ts fitConstants): the page formats the record, it never types
   // a result. The headline sits above the fold; the full record sits in the
-  // method panel, with the selection grid and the leave-one-out figures.
+  // method panel, with the selection grid, the walk-forward folds and the
+  // leave-one-out figures.
+  function miniTable(heads, rows) {
+    var t = el('table', null, el('thead', null, el('tr', null, heads.map(function (h) { return el('th', { text: h }); }))),
+      el('tbody', null, rows.map(function (r) {
+        return el('tr', null, r.map(function (c, i) {
+          return el('td', { class: (typeof c === 'number' ? 'num' : '') + (typeof c === 'number' && c < 0 && i > 0 ? ' neg' : ''), text: typeof c === 'number' ? (Number.isInteger(c) ? String(c) : c.toFixed(3)) : c });
+        }));
+      })));
+    return t;
+  }
   function renderValidation() {
     var v = DATA.validation;
     var h = v.holdout, hb = v.holdout_baseline, f = v.fit_loo, fb = v.fit_loo_baseline, l = v.loo_all, lb = v.loo_all_baseline;
@@ -127,6 +138,29 @@
     $('test-note').textContent = 'Constants fitted by leave-one-out on ' + v.fit_protocols + ' protocols over ' + v.grid_cells +
       ' grid cells (prior ' + v.selected_prior + ', growth weight ' + v.selected_growth_weight + ', slope ' + v.selected_slope +
       '); the ' + v.holdout_protocols + ' held out touched neither selection nor fitting. Full record below, in “The held-out test”.';
+    var w = v.walk_forward, wp = w.pooled, wb = w.pooled_baseline;
+    $('test-wf').textContent = 'Walk-forward in listing time: ' + wp.n + ' later listings predicted from earlier ones only, ' +
+      'median log error ' + wp.median_abs_log_error.toFixed(3) + ' vs flat ' + wb.median_abs_log_error.toFixed(3) +
+      ' (typical ×' + wp.typical_multiple.toFixed(2) + ' vs ×' + wb.typical_multiple.toFixed(2) + '), winning ' + wp.wins + ' of ' + wp.n + '.';
+    $('wf-detail').textContent = 'Rule: ' + w.rule + ' — ' + w.dated_protocols + ' of the ' + v.token_protocols +
+      ' token protocols carry a listing date and can be ordered in time; the rest sit outside this test. ' +
+      'Each fold refits the medians, the median age and the reference TVL on its training window alone, with the fitted constants held fixed. ' +
+      'Pooled over the ' + wp.n + ' tested listings: median ' + wp.median_abs_log_error.toFixed(3) + ' vs flat ' + wb.median_abs_log_error.toFixed(3) +
+      ' (mean ' + wp.mean_abs_log_error.toFixed(3) + ' vs ' + wb.mean_abs_log_error.toFixed(3) + ', ' + wp.wins + '–' + wb.wins + ').';
+    var wfWrap = $('wf-table');
+    wfWrap.textContent = '';
+    wfWrap.appendChild(miniTable(['Fold', 'Train', 'Test', 'Train through', 'Model median', 'Flat median', 'Model wins'],
+      w.folds.map(function (fo) { return ['Fold ' + fo.fold, fo.train_n, fo.test_n, fo.train_through, fo.model_median, fo.baseline_median, fo.model_wins + ' / ' + fo.test_n]; })));
+    var s = v.sensitivity;
+    var better = s.filter(function (r) { return r.holdout_delta < 0; }).length;
+    $('sens-detail').textContent = 'Each fitted constant moved one grid step either way, with the fit-set leave-one-out error and the holdout error recomputed. ' +
+      'The chosen constants win on the fit-set leave-one-out error — the criterion that selected them. ' + better +
+      ' of the 6 neighbours test better on the 25 holdout protocols alone, which is why the holdout was never the selection criterion: ' +
+      'a 25-protocol split is too small to choose constants on, and choosing on it would overfit it.';
+    var sensWrap = $('sens-table');
+    sensWrap.textContent = '';
+    sensWrap.appendChild(miniTable(['Constants', 'Fit LOO median', 'Holdout median', 'Δ fit LOO', 'Δ holdout'],
+      s.map(function (r) { return [r.label, r.fit_loo_median, r.holdout_median, r.fit_delta, r.holdout_delta]; })));
     $('test-detail').textContent = 'Split: ' + v.split_rule + ' — ' + v.fit_protocols + ' protocols fit, ' + v.holdout_protocols +
       ' held out. Selection: ' + v.selection_metric + ', over ' + v.grid_cells + ' cells (8 priors × 5 growth weights × 7 slopes), ' +
       'choosing prior ' + v.selected_prior + ', growth weight ' + v.selected_growth_weight + ', slope ' + v.selected_slope + '. ' +
@@ -171,12 +205,13 @@
     $('excluded-note').textContent = 'On this snapshot, ' + DATA.excluded_total + ' of ' + DATA.pre_token_total +
       ' protocols recording no token were excluded as wrapped, staked, bridged or versioned products, and ' +
       (DATA.protocols_total - DATA.pre_token_total) + ' protocols recording a token were set aside.';
-    var top = DATA.rows[0];
+    var verdictCounts = { farm: 0, thin: 0, skip: 0 };
+    DATA.rows.forEach(function (r) { verdictCounts[r.farm_verdict.verdict] += 1; });
     var tiles = [
       { label: 'Watchlist covered', value: DATA.watchlist_size + ' / ' + DATA.watchlist_size, sub: 'floor $' + Math.round(DATA.floor_usd / 1e6) + 'M, every slug ranked', hot: true },
       { label: 'Board rows', value: String(DATA.board_size), sub: DATA.early_size + ' rows beyond the watchlist', hot: false },
-      { label: 'Global median multiple', value: '×' + DATA.global_multiple.toFixed(3), sub: 'median mcap/TVL, ' + DATA.global_sample + ' token protocols', hot: false },
-      { label: 'Top implied value', value: fmtUsd(top ? top.implied_value_usd : 0), sub: top ? top.name : '', hot: false }
+      { label: 'Traded comps price the board', value: String(DATA.validation.token_protocols), sub: DATA.protocols_total + ' protocols accounted for, ' + DATA.live_size + ' live-token rows set aside', hot: false },
+      { label: 'Farm verdicts, netted', value: verdictCounts.farm + ' farm · ' + verdictCounts.thin + ' thin · ' + verdictCounts.skip + ' skip', sub: 'every row netted in dollars at 0.001% of its value', hot: false }
     ];
     var wrap = $('tiles');
     wrap.textContent = '';
@@ -249,7 +284,8 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + width + '%' }))
         )),
         el('td', null, el('span', { class: 'verdict-chip ' + r.farm_verdict.verdict, text: r.farm_verdict.verdict.toUpperCase() }),
-          el('span', { class: 'verdict-be', text: 'break-even ' + r.farm_verdict.break_even_pct.toFixed(4) + '%' }))
+          el('span', { class: 'verdict-be', text: 'break-even ' + r.farm_verdict.break_even_pct.toFixed(4) + '%' }),
+          el('span', { class: 'verdict-be', text: 'net ' + (r.farm_verdict.net_usd < 0 ? '−' : '+') + fmtUsd(Math.abs(r.farm_verdict.net_usd)) + ' at 0.001%' }))
       );
       tbody.appendChild(tr);
     });
@@ -318,6 +354,8 @@
       ' Break-even needs an allocation of ' + fmtUsdFull(fv.expected_cost_usd) + ' — ' + fv.break_even_pct.toFixed(4) + '% of the implied value.'));
     vd.appendChild(el('p', { class: 'sub' }, 'Sunk gas ' + fmtUsdFull(fv.gas_usd) + ' (two gas budgets: farming plus exit) + 5% risk charge ' +
       fmtUsdFull(fv.risk_usd) + ' on ' + fmtUsdFull(fv.capital_usd) + ' deployed = ' + fmtUsdFull(fv.expected_cost_usd) + ' expected cost. ' +
+      'At the stated plausible allocation of ' + fmtUsdFull(fv.plausible_alloc_usd) + ' (0.001% of the implied value) the plan nets ' +
+      (fv.net_usd < 0 ? '−' : '+') + fmtUsdFull(Math.abs(fv.net_usd)) + '. ' +
       'The band\u2019s low end holds ' + Math.round(fv.band_low_ratio * 100) + '% of the point estimate. ' +
       'Farm needs break-even at most 0.001% with the low end holding 75%; thin needs at most 0.01% with the low end holding 50%; anything else is a skip. ' +
       'The capital itself is deployed, not spent — the risk charge is the stated allowance for losing part of it.'));
@@ -422,11 +460,12 @@
   $('mintvl').addEventListener('change', function (e) { state.minTvl = Number(e.target.value); render(); });
   $('watchonly').addEventListener('change', function (e) { state.watchOnly = e.target.checked; render(); });
   $('risingonly').addEventListener('change', function (e) { state.risingOnly = e.target.checked; render(); });
+  $('verdict').addEventListener('change', function (e) { state.verdict = e.target.value; render(); });
   $('tab-pre').addEventListener('click', function () { state.tab = 'pre'; render(); });
   $('tab-live').addEventListener('click', function () { state.tab = 'live'; render(); });
   $('clear-filters').addEventListener('click', function () {
-    state.q = ''; state.category = 'all'; state.chain = 'all'; state.minTvl = 0; state.watchOnly = false; state.risingOnly = false;
-    $('q').value = ''; $('category').value = 'all'; $('chain').value = 'all'; $('mintvl').value = '0'; $('watchonly').checked = false; $('risingonly').checked = false;
+    state.q = ''; state.category = 'all'; state.chain = 'all'; state.minTvl = 0; state.watchOnly = false; state.risingOnly = false; state.verdict = 'all';
+    $('q').value = ''; $('category').value = 'all'; $('chain').value = 'all'; $('mintvl').value = '0'; $('watchonly').checked = false; $('risingonly').checked = false; $('verdict').value = 'all';
     render();
   });
   Array.prototype.forEach.call(document.querySelectorAll('th button[data-sort]'), function (btn) {
